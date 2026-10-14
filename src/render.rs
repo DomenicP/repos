@@ -1,13 +1,35 @@
-mod progress;
+mod fetch;
 mod text;
 
-pub use progress::Progress;
+pub use fetch::{FetchProgress, fetch_result};
 
 use self::text::{escape, path_text};
 use crate::git::{Changes, Status};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
+
+pub fn color_enabled(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb")
+        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+}
+
+pub fn status_progress() -> indicatif::ProgressBar {
+    let bar = if io::stdout().is_terminal() {
+        indicatif::ProgressBar::new_spinner()
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("{spinner} Inspecting repositories…")
+            .expect("status progress template is valid"),
+    );
+    if !bar.is_hidden() {
+        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    }
+    bar
+}
 
 const HEADERS: [&str; 5] = ["REPOSITORY", "BRANCH", "STATE", "CHANGES", "UPSTREAM"];
 

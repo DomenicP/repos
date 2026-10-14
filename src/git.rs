@@ -1,3 +1,4 @@
+mod fetch;
 mod status;
 
 pub use status::collect_status;
