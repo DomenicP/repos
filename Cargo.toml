@@ -1,13 +1,13 @@
 [package]
 name = "repos"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Bulk commands for multiple Git repositories"
 
 [dependencies]
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
-git2 = { version = "0.21", default-features = false, features = ["ssh"] }
+git2 = { version = "0.21", default-features = false, features = ["https", "ssh"] }
 indicatif = { version = "0.18.6", default-features = false, features = ["unicode-width"] }
 unicode-width = "0.2"
 

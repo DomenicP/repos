@@ -18,6 +18,8 @@ Upstream counts use local refs.";
 #[derive(clap::Parser)]
 #[command(
     name = "repos",
+    version,
+    help_template = "{name} {version}\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
     args_conflicts_with_subcommands = true,
     after_help = LEGEND
 )]
