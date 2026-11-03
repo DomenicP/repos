@@ -52,6 +52,14 @@ pub struct Repository {
 }
 
 impl Repository {
+    pub fn is_worktree(&self) -> bool {
+        self.repo.is_worktree()
+    }
+
+    pub fn common_dir(&self) -> &Path {
+        self.repo.commondir()
+    }
+
     pub fn open(path: &Path) -> Result<Self, git2::Error> {
         let repo = git2::Repository::open_ext(
             path,

@@ -7,7 +7,7 @@ use self::text::{escape, path_text};
 use crate::git::{Changes, Status};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn color_enabled(stream: &impl IsTerminal) -> bool {
     stream.is_terminal()
@@ -224,6 +224,21 @@ pub fn table(
     submodules: bool,
     color: bool,
 ) -> io::Result<()> {
+    let width = io::stdout()
+        .is_terminal()
+        .then(|| usize::from(console::Term::stdout().size().1));
+    table_with_width(out, root, rows, dirty, submodules, color, width)
+}
+
+fn table_with_width(
+    out: &mut impl Write,
+    root: &Path,
+    rows: &[Status],
+    dirty: bool,
+    submodules: bool,
+    color: bool,
+    terminal_width: Option<usize>,
+) -> io::Result<()> {
     let mut table = Vec::new();
     for repo in rows {
         if should_show(repo, dirty, submodules) {
@@ -248,9 +263,28 @@ pub fn table(
             widths[column] = widths[column].max(cell.text.width());
         }
     }
+    if let Some(width) = terminal_width {
+        // Preserve state and change counts while reducing the widest name columns.
+        // On very narrow terminals, allow every column to shrink to one cell.
+        let budget = width.saturating_sub(HEADERS.len() - 1).max(HEADERS.len());
+        while widths.iter().sum::<usize>() > budget {
+            let column = [0, 1, 4]
+                .into_iter()
+                .filter(|&i| widths[i] > HEADERS[i].width())
+                .max_by_key(|&i| widths[i])
+                .or_else(|| {
+                    (0..HEADERS.len())
+                        .filter(|&i| widths[i] > 1)
+                        .max_by_key(|&i| widths[i])
+                })
+                .expect("columns can shrink to fit the budget");
+            widths[column] -= 1;
+        }
+    }
     for row in table {
         let mut line = String::new();
-        for (column, cell) in row.into_iter().enumerate() {
+        for (column, mut cell) in row.into_iter().enumerate() {
+            cell.text = ellipsize(&cell.text, widths[column]);
             cell.write(
                 &mut line,
                 color,
@@ -262,9 +296,117 @@ pub fn table(
     Ok(())
 }
 
+// Keep both ends so paths retain their leaf names and upstreams retain counts.
+fn ellipsize(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let prefix_width = (width - 1) / 2;
+    let suffix_width = width - 1 - prefix_width;
+    let mut prefix = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let size = c.width().unwrap_or(0);
+        if used + size > prefix_width {
+            break;
+        }
+        prefix.push(c);
+        used += size;
+    }
+    let mut suffix = Vec::new();
+    used = 0;
+    for c in text.chars().rev() {
+        let size = c.width().unwrap_or(0);
+        if used + size > suffix_width {
+            break;
+        }
+        suffix.push(c);
+        used += size;
+    }
+    prefix.push('…');
+    prefix.extend(suffix.into_iter().rev());
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_terminal_keeps_aligned_rows_and_shortens_names() {
+        let name = "worktrees/very-long-repository-name/界界界";
+        let branch = "feature/a-very-long-branch-name";
+        let rows = [Status {
+            path: Path::new("/root").join(name),
+            branch: branch.into(),
+            ..Status::default()
+        }];
+        let mut output = Vec::new();
+        table_with_width(
+            &mut output,
+            Path::new("/root"),
+            &rows,
+            false,
+            false,
+            false,
+            Some(70),
+        )
+        .expect("table should render");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.lines().all(|line| line.width() <= 70));
+        assert!(output.contains('…'));
+        assert!(output.contains("界界界"));
+        assert!(output.contains("clean"));
+        let lines: Vec<_> = output.lines().collect();
+        let state_column = lines[0].find("STATE").expect("state header");
+        let state_value = lines[1].find("clean").expect("state value");
+        assert_eq!(
+            lines[0][..state_column].width(),
+            lines[1][..state_value].width()
+        );
+
+        let mut wide = Vec::new();
+        let mut redirected = Vec::new();
+        table_with_width(
+            &mut wide,
+            Path::new("/root"),
+            &rows,
+            false,
+            false,
+            false,
+            Some(200),
+        )
+        .expect("wide table should render");
+        table_with_width(
+            &mut redirected,
+            Path::new("/root"),
+            &rows,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("redirected table should render");
+        assert_eq!(wide, redirected);
+        let wide = String::from_utf8(wide).expect("UTF-8 output");
+        assert!(wide.contains(name));
+        assert!(wide.contains(branch));
+    }
+
+    #[test]
+    fn ellipsis_respects_display_width_and_preserves_both_ends() {
+        assert_eq!(ellipsize("feature/a-long-branch", 14), "featur…-branch");
+        assert_eq!(ellipsize("界界界界", 5), "界…界");
+        assert_eq!(ellipsize("main", 4), "main");
+        assert_eq!(ellipsize("main", 1), "…");
+        for width in 0..20 {
+            assert!(ellipsize("worktrees/界界界/long-name", width).width() <= width);
+        }
+    }
 
     #[test]
     fn shorthand_and_distinct_upstream() {

@@ -12,6 +12,69 @@ fn fetch(root: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn fetches_shared_repository_once_and_handles_worktree_only_roots() {
+    let fixture = Fixture::new();
+    let source = fixture.repo("source", true);
+    let base = fixture.repo("workspace/z-base", true);
+    fixture.git(
+        &base,
+        &[
+            "remote",
+            "add",
+            "origin",
+            source.to_str().expect("UTF-8 path"),
+        ],
+    );
+    for name in ["a-linked", "b-linked"] {
+        fixture.git(
+            &base,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                fixture
+                    .root
+                    .join("workspace")
+                    .join(name)
+                    .to_str()
+                    .expect("UTF-8 path"),
+            ],
+        );
+    }
+    let output = fetch(&fixture.root.join("workspace"), &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "✓ z-base: fetched 1 remotes"
+    );
+    assert_eq!(
+        fixture.git(&base, &["rev-parse", "origin/main"]),
+        fixture.git(&source, &["rev-parse", "HEAD"])
+    );
+
+    write(&source, "new file", "new commit\n");
+    fixture.commit(&source);
+    let output = fetch(&fixture.root.join("workspace/a-linked"), &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "✓ .: fetched 1 remotes"
+    );
+    assert_eq!(
+        fixture.git(&base, &["rev-parse", "origin/main"]),
+        fixture.git(&source, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
 fn fetches_every_remote_without_changing_head_or_worktree() {
     let fixture = Fixture::new();
     let first = fixture.repo("sources/first", true);

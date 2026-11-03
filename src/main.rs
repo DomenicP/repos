@@ -49,6 +49,9 @@ struct StatusArguments {
     /// Show submodules as child rows
     #[arg(long)]
     submodules: bool,
+    /// Include linked worktrees
+    #[arg(long)]
+    worktrees: bool,
 }
 
 #[derive(clap::Args)]
@@ -76,6 +79,7 @@ fn run_fetch(options: WorkspaceArguments) -> ExitCode {
         Err(code) => return code,
     };
     let (paths, mut errors) = workspace::discover(&root, max_depth);
+    let paths = workspace::fetch_paths(paths);
     let summary_color = render::color_enabled(&io::stdout());
     let progress = render::FetchProgress::new(&root, &paths);
     let results = workspace::run(&paths, |path| {
@@ -132,14 +136,15 @@ fn run_status(options: StatusArguments) -> ExitCode {
     let progress = render::status_progress();
     let (repo_paths, mut errors) = workspace::discover(&root, max_depth);
     let results = workspace::run(&repo_paths, |path| match git::Repository::open(path) {
-        Ok(repo) => repo.status(),
-        Err(error) => git::Status {
+        Ok(repo) if repo.is_worktree() && !options.worktrees => None,
+        Ok(repo) => Some(repo.status()),
+        Err(error) => Some(git::Status {
             path: path.to_owned(),
             error: Some(error.message().to_owned()),
             ..git::Status::default()
-        },
+        }),
     });
-    let (rows, inspection_errors) = git::collect_status(results);
+    let (rows, inspection_errors) = git::collect_status(results.into_iter().flatten().collect());
     errors.extend(inspection_errors);
     progress.finish_and_clear();
 

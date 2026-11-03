@@ -36,7 +36,7 @@ fn nested_hidden_repositories_and_depth_limits() {
 }
 
 #[test]
-fn linked_worktrees_are_discovered() {
+fn linked_worktrees_require_opt_in() {
     let fixture = Fixture::new();
     let source = fixture.repo("source", true);
     fixture.git(
@@ -53,8 +53,24 @@ fn linked_worktrees_are_discovered() {
         ],
     );
     let output = summary(&fixture.root, &[]);
+    assert_eq!(rows(&output).len(), 1);
+    assert_eq!(row(&output, "source").state, "clean");
+    let output = summary(&fixture.root, &["--worktrees"]);
     assert_eq!(row(&output, "linked").state, "detached,clean");
     assert_eq!(row(&output, "source").state, "clean");
+    let explicit = command()
+        .args(["status", "--worktrees", "--root"])
+        .arg(&fixture.root)
+        .output()
+        .expect("status should execute");
+    assert!(explicit.status.success());
+    assert_eq!(explicit.stdout, output.as_bytes());
+    let linked = fixture.root.join("linked");
+    assert_eq!(summary(&linked, &[]), "No repositories found.\n");
+    assert_eq!(
+        row(&summary(&linked, &["--worktrees"]), ".").state,
+        "detached,clean"
+    );
 }
 
 #[cfg(unix)]

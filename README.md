@@ -4,11 +4,11 @@ Bulk commands for quickly working with multiple Git repositories. Assumes you al
 
 ## Features
 
-**status**: Show local Git repositories, branches, changes, and upstream status in a compact table.
+**status**: Show local Git repositories, branches, changes, and upstream status in a compact table. Include linked worktrees with `--worktrees`. Long names are shortened in the middle with `…` to fit the terminal, keeping one row per repository. Redirected output shows full names.
 
 **fetch**: Fetch every configured remote in discovered repositories in parallel using SSH-agent authentication (SSH URLs must include a username). Failed remotes are reported while other fetches continue; any failure exits with code 1. Submodules are fetched only when discovery finds them.
 
-Discovery defaults to depth 3 (root is 0), includes nested repositories and linked worktrees, and skips child directory symlinks.
+Discovery defaults to depth 3 (root is 0), includes nested repositories, and skips child directory symlinks. Fetch runs once per shared repository, preferring its base checkout when discovered, even when multiple linked worktrees are found.
 
 Changes: `S` staged, `M` modified, `?` untracked, `!` conflicts.
 Upstream: `=` equal, `+N` ahead, `-N` behind, `+N/-N` diverged,
@@ -36,6 +36,7 @@ repos fetch
 ```sh
 repos --root ~/src --dirty          # Only repositories needing attention
 repos --root ~/src --submodules     # Include submodule rows
+repos status --root ~/src --worktrees # Include linked worktrees
 repos --root ~/src --max-depth -1   # Search without a depth limit
 repos --help                        # All options and output labels
 ```

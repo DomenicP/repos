@@ -1,7 +1,33 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+
+// Fetch shared refs once, preferring a discovered main checkout. If only linked
+// worktrees are in scope, use the first one rather than skipping the repository.
+pub fn fetch_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut shared = BTreeMap::new();
+    let mut selected = Vec::new();
+    for path in paths {
+        let Ok(repo) = crate::git::Repository::open(&path) else {
+            // Keep invalid repositories so the normal fetch path reports errors.
+            selected.push(path);
+            continue;
+        };
+        let common = repo
+            .common_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| repo.common_dir().to_owned());
+        let entry = shared.entry(common).or_insert_with(|| path.clone());
+        if !repo.is_worktree() {
+            *entry = path;
+        }
+    }
+    selected.extend(shared.into_values());
+    selected.sort();
+    selected
+}
 
 pub fn discover(root: &Path, max_depth: Option<usize>) -> (Vec<PathBuf>, Vec<String>) {
     let mut paths = Vec::new();
