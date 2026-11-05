@@ -1,0 +1,540 @@
+use super::{
+    BOLD, CYAN, DIM, GREEN, RED, TableCell, YELLOW,
+    text::{escape, path_text},
+};
+use crate::git::{Changes, Status};
+use std::io::{self, IsTerminal, Write};
+use std::path::Path;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+pub fn status_progress() -> indicatif::ProgressBar {
+    let bar = if io::stdout().is_terminal() {
+        indicatif::ProgressBar::new_spinner()
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("{spinner} Inspecting repositories…")
+            .expect("status progress template is valid"),
+    );
+    if !bar.is_hidden() {
+        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    }
+    bar
+}
+
+const HEADERS: [&str; 5] = ["REPOSITORY", "BRANCH", "STATE", "CHANGES", "UPSTREAM"];
+
+fn state(row: &Status) -> String {
+    if row.error.is_some() {
+        return "error".into();
+    }
+    if row.uninitialized {
+        return "uninitialized".into();
+    }
+    let mut states = Vec::new();
+    if row.no_commits {
+        states.push("no-commits");
+    }
+    if row.branch == "(detached)" {
+        states.push("detached");
+    }
+    states.push(if row.changes.conflicts > 0 {
+        "conflict"
+    } else if row.changes.attention() {
+        "dirty"
+    } else {
+        "clean"
+    });
+    states.join(",")
+}
+
+fn upstream_text(row: &Status) -> String {
+    if row.upstream.is_empty() {
+        return "-".into();
+    }
+    let suffix = format!("/{}", row.branch);
+    let name = if row.branch.is_empty() {
+        &row.upstream
+    } else {
+        row.upstream.strip_suffix(&suffix).unwrap_or(&row.upstream)
+    };
+    let state = if !row.ab_known {
+        "?".into()
+    } else if row.ahead > 0 && row.behind > 0 {
+        format!("+{}/-{}", row.ahead, row.behind)
+    } else if row.ahead > 0 {
+        format!("+{}", row.ahead)
+    } else if row.behind > 0 {
+        format!("-{}", row.behind)
+    } else {
+        "=".into()
+    };
+    format!("{} {state}", escape(name))
+}
+
+fn changes_text(changes: &Changes) -> String {
+    let counts = [
+        ("S", changes.staged),
+        ("M", changes.modified),
+        ("?", changes.untracked),
+        ("!", changes.conflicts),
+        ("subC", changes.sub_commits),
+        ("subM", changes.sub_modified),
+        ("sub?", changes.sub_untracked),
+        ("subU", changes.uninitialized),
+    ];
+    let parts: Vec<_> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(label, n)| format!("{label}:{n}"))
+        .collect();
+    if parts.is_empty() {
+        "-".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+#[derive(Default)]
+pub struct StatusFilter {
+    pub dirty: bool,
+    pub unsynced: bool,
+    pub submodules: bool,
+}
+
+fn should_show(repo: &Status, filter: &StatusFilter) -> bool {
+    if repo.error.is_some() {
+        return true;
+    }
+    if repo.parent.is_some() && !filter.submodules {
+        return false;
+    }
+    (!filter.dirty || repo.changes.attention() || repo.uninitialized)
+        && (!filter.unsynced || (repo.ab_known && (repo.ahead > 0 || repo.behind > 0)))
+}
+
+fn repository_cells(root: &Path, repo: &Status) -> [TableCell; HEADERS.len()] {
+    let relative = repo.path.strip_prefix(root).unwrap_or(&repo.path);
+    let mut name = path_text(relative);
+    if name.is_empty() {
+        name = ".".into();
+    }
+    if repo.parent.is_some() {
+        name = format!("  {name}");
+    }
+    let branch = if repo.branch.is_empty() {
+        "-".into()
+    } else {
+        escape(&repo.branch)
+    };
+
+    [
+        TableCell::new(name, ""),
+        TableCell::new(branch, CYAN),
+        state_cell(repo),
+        changes_cell(repo),
+        upstream_cell(repo),
+    ]
+}
+
+fn state_cell(repo: &Status) -> TableCell {
+    let state_tone = if repo.error.is_some() || repo.changes.conflicts > 0 {
+        RED
+    } else if repo.no_commits
+        || repo.branch == "(detached)"
+        || repo.uninitialized
+        || repo.changes.attention()
+    {
+        YELLOW
+    } else {
+        GREEN
+    };
+
+    TableCell::new(state(repo), state_tone)
+}
+
+fn changes_cell(repo: &Status) -> TableCell {
+    let changes = repo
+        .error
+        .as_ref()
+        .map_or_else(|| changes_text(&repo.changes), |e| escape(e));
+    let change_tone = if repo.error.is_some() || repo.changes.conflicts > 0 {
+        RED
+    } else if changes == "-" {
+        DIM
+    } else {
+        YELLOW
+    };
+    TableCell::new(changes, change_tone)
+}
+
+fn upstream_cell(repo: &Status) -> TableCell {
+    let upstream_tone = if repo.upstream.is_empty() {
+        DIM
+    } else if repo.ahead > 0 && repo.behind > 0 {
+        RED
+    } else if !repo.ab_known || repo.behind > 0 {
+        YELLOW
+    } else if repo.ahead > 0 {
+        CYAN
+    } else {
+        GREEN
+    };
+
+    TableCell::new(upstream_text(repo), upstream_tone)
+}
+
+pub fn table(
+    out: &mut impl Write,
+    root: &Path,
+    rows: &[Status],
+    filter: &StatusFilter,
+    color: bool,
+) -> io::Result<()> {
+    let width = io::stdout()
+        .is_terminal()
+        .then(|| usize::from(console::Term::stdout().size().1));
+    table_with_width(out, root, rows, filter, color, width)
+}
+
+fn table_with_width(
+    out: &mut impl Write,
+    root: &Path,
+    rows: &[Status],
+    filter: &StatusFilter,
+    color: bool,
+    terminal_width: Option<usize>,
+) -> io::Result<()> {
+    let mut table = Vec::new();
+    for repo in rows {
+        if should_show(repo, filter) {
+            table.push(repository_cells(root, repo));
+        }
+    }
+    if table.is_empty() {
+        return writeln!(
+            out,
+            "{}",
+            if rows.is_empty() {
+                "No repositories found."
+            } else if filter.unsynced {
+                "No repositories match the filters."
+            } else {
+                "No repositories need attention."
+            }
+        );
+    }
+    table.insert(0, HEADERS.map(|text| TableCell::new(text.into(), BOLD)));
+    let mut widths = [0; HEADERS.len()];
+    for row in &table {
+        for (column, cell) in row.iter().enumerate() {
+            widths[column] = widths[column].max(cell.text.width());
+        }
+    }
+    if let Some(width) = terminal_width {
+        // Preserve state and change counts while reducing the widest name columns.
+        // On very narrow terminals, allow every column to shrink to one cell.
+        let budget = width.saturating_sub(HEADERS.len() - 1).max(HEADERS.len());
+        while widths.iter().sum::<usize>() > budget {
+            let column = [0, 1, 4]
+                .into_iter()
+                .filter(|&i| widths[i] > HEADERS[i].width())
+                .max_by_key(|&i| widths[i])
+                .or_else(|| {
+                    (0..HEADERS.len())
+                        .filter(|&i| widths[i] > 1)
+                        .max_by_key(|&i| widths[i])
+                })
+                .expect("columns can shrink to fit the budget");
+            widths[column] -= 1;
+        }
+    }
+    for row in table {
+        let mut line = String::new();
+        for (column, mut cell) in row.into_iter().enumerate() {
+            cell.text = ellipsize(&cell.text, widths[column]);
+            cell.write(
+                &mut line,
+                color,
+                (column + 1 < HEADERS.len()).then_some(widths[column]),
+            );
+        }
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+// Keep both ends so paths retain their leaf names and upstreams retain counts.
+fn ellipsize(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let prefix_width = (width - 1) / 2;
+    let suffix_width = width - 1 - prefix_width;
+    let mut prefix = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let size = c.width().unwrap_or(0);
+        if used + size > prefix_width {
+            break;
+        }
+        prefix.push(c);
+        used += size;
+    }
+    let mut suffix = Vec::new();
+    used = 0;
+    for c in text.chars().rev() {
+        let size = c.width().unwrap_or(0);
+        if used + size > suffix_width {
+            break;
+        }
+        suffix.push(c);
+        used += size;
+    }
+    prefix.push('…');
+    prefix.extend(suffix.into_iter().rev());
+    prefix
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsynced_filters_upstream_states_and_combines_with_dirty() {
+        let mut filter = StatusFilter {
+            unsynced: true,
+            ..StatusFilter::default()
+        };
+        for (ahead, behind) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let mut repo = Status {
+                ahead,
+                behind,
+                ab_known: true,
+                ..Status::default()
+            };
+            let unsynced = ahead > 0 || behind > 0;
+            assert_eq!(should_show(&repo, &filter), unsynced);
+            filter.dirty = true;
+            assert!(!should_show(&repo, &filter));
+            repo.changes.modified = 1;
+            assert_eq!(should_show(&repo, &filter), unsynced);
+            filter.dirty = false;
+            repo.ab_known = false;
+            assert!(!should_show(&repo, &filter));
+        }
+        let mut repo = Status::default();
+        assert!(!should_show(&repo, &filter));
+        repo.upstream = "origin/main".into();
+        assert!(!should_show(&repo, &filter));
+        repo.error = Some("inspection failed".into());
+        assert!(should_show(&repo, &filter));
+    }
+
+    #[test]
+    fn unsynced_respects_submodule_visibility_and_empty_output() {
+        let mut filter = StatusFilter {
+            unsynced: true,
+            ..StatusFilter::default()
+        };
+        let repo = Status {
+            parent: Some("/root/parent".into()),
+            ab_known: true,
+            behind: 1,
+            ..Status::default()
+        };
+        assert!(!should_show(&repo, &filter));
+        filter.submodules = true;
+        assert!(should_show(&repo, &filter));
+
+        let mut output = Vec::new();
+        table(
+            &mut output,
+            Path::new("/root"),
+            &[Status::default()],
+            &filter,
+            false,
+        )
+        .expect("table should render");
+        assert_eq!(output, b"No repositories match the filters.\n");
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_aligned_rows_and_shortens_names() {
+        let name = "worktrees/very-long-repository-name/界界界";
+        let branch = "feature/a-very-long-branch-name";
+        let rows = [Status {
+            path: Path::new("/root").join(name),
+            branch: branch.into(),
+            ..Status::default()
+        }];
+        let mut output = Vec::new();
+        table_with_width(
+            &mut output,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+            Some(70),
+        )
+        .expect("table should render");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.lines().all(|line| line.width() <= 70));
+        assert!(output.contains('…'));
+        assert!(output.contains("界界界"));
+        assert!(output.contains("clean"));
+        let lines: Vec<_> = output.lines().collect();
+        let state_column = lines[0].find("STATE").expect("state header");
+        let state_value = lines[1].find("clean").expect("state value");
+        assert_eq!(
+            lines[0][..state_column].width(),
+            lines[1][..state_value].width()
+        );
+
+        let mut wide = Vec::new();
+        let mut redirected = Vec::new();
+        table_with_width(
+            &mut wide,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+            Some(200),
+        )
+        .expect("wide table should render");
+        table_with_width(
+            &mut redirected,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+            None,
+        )
+        .expect("redirected table should render");
+        assert_eq!(wide, redirected);
+        let wide = String::from_utf8(wide).expect("UTF-8 output");
+        assert!(wide.contains(name));
+        assert!(wide.contains(branch));
+    }
+
+    #[test]
+    fn ellipsis_respects_display_width_and_preserves_both_ends() {
+        assert_eq!(ellipsize("feature/a-long-branch", 14), "featur…-branch");
+        assert_eq!(ellipsize("界界界界", 5), "界…界");
+        assert_eq!(ellipsize("main", 4), "main");
+        assert_eq!(ellipsize("main", 1), "…");
+        for width in 0..20 {
+            assert!(ellipsize("worktrees/界界界/long-name", width).width() <= width);
+        }
+    }
+
+    #[test]
+    fn shorthand_and_distinct_upstream() {
+        let row = Status {
+            branch: "main".into(),
+            upstream: "origin/other".into(),
+            ahead: 2,
+            behind: 1,
+            ab_known: true,
+            ..Status::default()
+        };
+        assert_eq!(upstream_text(&row), "origin/other +2/-1");
+        assert_eq!(
+            changes_text(&Changes {
+                staged: 2,
+                untracked: 1,
+                sub_untracked: 3,
+                ..Changes::default()
+            }),
+            "S:2 ?:1 sub?:3"
+        );
+    }
+
+    #[test]
+    fn color_preserves_column_spacing() {
+        let rows = [Status {
+            path: "/root/répo".into(),
+            branch: "main".into(),
+            ..Status::default()
+        }];
+        let mut plain = Vec::new();
+        let mut colored = Vec::new();
+        table(
+            &mut plain,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+        )
+        .expect("table should render successfully");
+        table(
+            &mut colored,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            true,
+        )
+        .expect("table should render successfully");
+        let mut stripped = String::from_utf8(colored).expect("test output should be valid UTF-8");
+        for code in [BOLD, DIM, RED, GREEN, YELLOW, CYAN, "\x1b[0m"] {
+            stripped = stripped.replace(code, "");
+        }
+        assert_eq!(
+            String::from_utf8(plain).expect("test output should be valid UTF-8"),
+            stripped
+        );
+    }
+
+    #[test]
+    fn wide_unicode_uses_terminal_width() {
+        let rows = [Status {
+            path: "/root/界".into(),
+            branch: "main".into(),
+            ..Status::default()
+        }];
+        let mut output = Vec::new();
+        table(
+            &mut output,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+        )
+        .expect("table should render successfully");
+        assert!(
+            String::from_utf8(output)
+                .expect("test output should be valid UTF-8")
+                .contains("界         main")
+        );
+    }
+
+    #[test]
+    fn propagates_output_failure() {
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            table(
+                &mut Failing,
+                Path::new("/root"),
+                &[],
+                &StatusFilter::default(),
+                false
+            )
+            .expect_err("failing writer should produce an output error")
+            .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+}
