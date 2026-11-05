@@ -135,14 +135,22 @@ impl TableCell {
     }
 }
 
-fn should_show(repo: &Status, dirty: bool, submodules: bool) -> bool {
+#[derive(Default)]
+pub struct StatusFilter {
+    pub dirty: bool,
+    pub unsynced: bool,
+    pub submodules: bool,
+}
+
+fn should_show(repo: &Status, filter: &StatusFilter) -> bool {
     if repo.error.is_some() {
         return true;
     }
-    if repo.parent.is_some() && !submodules {
+    if repo.parent.is_some() && !filter.submodules {
         return false;
     }
-    !dirty || repo.changes.attention() || repo.uninitialized
+    (!filter.dirty || repo.changes.attention() || repo.uninitialized)
+        && (!filter.unsynced || (repo.ab_known && (repo.ahead > 0 || repo.behind > 0)))
 }
 
 fn repository_cells(root: &Path, repo: &Status) -> [TableCell; HEADERS.len()] {
@@ -220,28 +228,26 @@ pub fn table(
     out: &mut impl Write,
     root: &Path,
     rows: &[Status],
-    dirty: bool,
-    submodules: bool,
+    filter: &StatusFilter,
     color: bool,
 ) -> io::Result<()> {
     let width = io::stdout()
         .is_terminal()
         .then(|| usize::from(console::Term::stdout().size().1));
-    table_with_width(out, root, rows, dirty, submodules, color, width)
+    table_with_width(out, root, rows, filter, color, width)
 }
 
 fn table_with_width(
     out: &mut impl Write,
     root: &Path,
     rows: &[Status],
-    dirty: bool,
-    submodules: bool,
+    filter: &StatusFilter,
     color: bool,
     terminal_width: Option<usize>,
 ) -> io::Result<()> {
     let mut table = Vec::new();
     for repo in rows {
-        if should_show(repo, dirty, submodules) {
+        if should_show(repo, filter) {
             table.push(repository_cells(root, repo));
         }
     }
@@ -251,6 +257,8 @@ fn table_with_width(
             "{}",
             if rows.is_empty() {
                 "No repositories found."
+            } else if filter.unsynced {
+                "No repositories match the filters."
             } else {
                 "No repositories need attention."
             }
@@ -336,6 +344,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsynced_filters_upstream_states_and_combines_with_dirty() {
+        let mut filter = StatusFilter {
+            unsynced: true,
+            ..StatusFilter::default()
+        };
+        for (ahead, behind) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let mut repo = Status {
+                ahead,
+                behind,
+                ab_known: true,
+                ..Status::default()
+            };
+            let unsynced = ahead > 0 || behind > 0;
+            assert_eq!(should_show(&repo, &filter), unsynced);
+            filter.dirty = true;
+            assert!(!should_show(&repo, &filter));
+            repo.changes.modified = 1;
+            assert_eq!(should_show(&repo, &filter), unsynced);
+            filter.dirty = false;
+            repo.ab_known = false;
+            assert!(!should_show(&repo, &filter));
+        }
+        let mut repo = Status::default();
+        assert!(!should_show(&repo, &filter));
+        repo.upstream = "origin/main".into();
+        assert!(!should_show(&repo, &filter));
+        repo.error = Some("inspection failed".into());
+        assert!(should_show(&repo, &filter));
+    }
+
+    #[test]
+    fn unsynced_respects_submodule_visibility_and_empty_output() {
+        let mut filter = StatusFilter {
+            unsynced: true,
+            ..StatusFilter::default()
+        };
+        let repo = Status {
+            parent: Some("/root/parent".into()),
+            ab_known: true,
+            behind: 1,
+            ..Status::default()
+        };
+        assert!(!should_show(&repo, &filter));
+        filter.submodules = true;
+        assert!(should_show(&repo, &filter));
+
+        let mut output = Vec::new();
+        table(
+            &mut output,
+            Path::new("/root"),
+            &[Status::default()],
+            &filter,
+            false,
+        )
+        .expect("table should render");
+        assert_eq!(output, b"No repositories match the filters.\n");
+    }
+
+    #[test]
     fn narrow_terminal_keeps_aligned_rows_and_shortens_names() {
         let name = "worktrees/very-long-repository-name/界界界";
         let branch = "feature/a-very-long-branch-name";
@@ -349,8 +416,7 @@ mod tests {
             &mut output,
             Path::new("/root"),
             &rows,
-            false,
-            false,
+            &StatusFilter::default(),
             false,
             Some(70),
         )
@@ -375,8 +441,7 @@ mod tests {
             &mut wide,
             Path::new("/root"),
             &rows,
-            false,
-            false,
+            &StatusFilter::default(),
             false,
             Some(200),
         )
@@ -385,8 +450,7 @@ mod tests {
             &mut redirected,
             Path::new("/root"),
             &rows,
-            false,
-            false,
+            &StatusFilter::default(),
             false,
             None,
         )
@@ -439,10 +503,22 @@ mod tests {
         }];
         let mut plain = Vec::new();
         let mut colored = Vec::new();
-        table(&mut plain, Path::new("/root"), &rows, false, false, false)
-            .expect("table should render successfully");
-        table(&mut colored, Path::new("/root"), &rows, false, false, true)
-            .expect("table should render successfully");
+        table(
+            &mut plain,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+        )
+        .expect("table should render successfully");
+        table(
+            &mut colored,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            true,
+        )
+        .expect("table should render successfully");
         let mut stripped = String::from_utf8(colored).expect("test output should be valid UTF-8");
         for code in [BOLD, DIM, RED, GREEN, YELLOW, CYAN, "\x1b[0m"] {
             stripped = stripped.replace(code, "");
@@ -461,8 +537,14 @@ mod tests {
             ..Status::default()
         }];
         let mut output = Vec::new();
-        table(&mut output, Path::new("/root"), &rows, false, false, false)
-            .expect("table should render successfully");
+        table(
+            &mut output,
+            Path::new("/root"),
+            &rows,
+            &StatusFilter::default(),
+            false,
+        )
+        .expect("table should render successfully");
         assert!(
             String::from_utf8(output)
                 .expect("test output should be valid UTF-8")
@@ -482,9 +564,15 @@ mod tests {
             }
         }
         assert_eq!(
-            table(&mut Failing, Path::new("/root"), &[], false, false, false)
-                .expect_err("failing writer should produce an output error")
-                .kind(),
+            table(
+                &mut Failing,
+                Path::new("/root"),
+                &[],
+                &StatusFilter::default(),
+                false
+            )
+            .expect_err("failing writer should produce an output error")
+            .kind(),
             io::ErrorKind::BrokenPipe
         );
     }

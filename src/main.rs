@@ -46,6 +46,9 @@ struct StatusArguments {
     /// Show only repositories needing attention
     #[arg(long)]
     dirty: bool,
+    /// Show only repositories ahead of or behind their upstream (local refs)
+    #[arg(long)]
+    unsynced: bool,
     /// Show submodules as child rows
     #[arg(long)]
     submodules: bool,
@@ -153,8 +156,11 @@ fn run_status(options: StatusArguments) -> ExitCode {
         &mut io::stdout().lock(),
         &root,
         &rows,
-        options.dirty,
-        options.submodules,
+        &render::StatusFilter {
+            dirty: options.dirty,
+            unsynced: options.unsynced,
+            submodules: options.submodules,
+        },
         color,
     ) {
         errors.push(format!("output: {error}"));

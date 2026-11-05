@@ -35,11 +35,15 @@ repos fetch
 
 ```sh
 repos --root ~/src --dirty          # Only repositories needing attention
+repos --root ~/src --unsynced    # Ahead of or behind upstream (local refs)
 repos --root ~/src --submodules     # Include submodule rows
 repos status --root ~/src --worktrees # Include linked worktrees
 repos --root ~/src --max-depth -1   # Search without a depth limit
 repos --help                        # All options and output labels
 ```
+
+`--unsynced` excludes absent or unresolved upstreams. Combine it with
+`--dirty` to require both filters to match. Inspection errors remain visible.
 
 ## Development
 
