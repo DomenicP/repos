@@ -4,7 +4,7 @@ mod git;
 mod render;
 mod workspace;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -23,29 +23,49 @@ Upstream counts use local refs.";
     args_conflicts_with_subcommands = true,
     after_help = LEGEND
 )]
-struct Arguments {
+struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Default command arguments
     #[command(flatten)]
-    status: StatusArguments,
+    status: StatusArgs,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(Subcommand)]
 enum Command {
     /// Fetch every remote, then fast-forward the current branch to its upstream
     #[command(visible_alias = "ff")]
-    FastForward(WorkspaceArguments),
+    FastForward(FastForwardArgs),
     /// Fetch every configured remote in discovered repositories
-    Fetch(WorkspaceArguments),
+    Fetch(CommonArgs),
     /// Summarize local Git repositories
     #[command(after_help = LEGEND)]
-    Status(StatusArguments),
+    Status(StatusArgs),
 }
 
 #[derive(clap::Args)]
-struct StatusArguments {
+struct CommonArgs {
+    /// Workspace root (overrides REPOS_ROOT; one is required)
+    #[arg(long, value_name = "PATH", allow_hyphen_values = true)]
+    root: Option<PathBuf>,
+    /// Maximum directory depth (root is 0; -1 disables the limit)
+    #[arg(long, value_name = "N", default_value_t = 3, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(-1..))]
+    max_depth: i64,
+}
+
+#[derive(clap::Args)]
+struct FastForwardArgs {
     #[command(flatten)]
-    workspace: WorkspaceArguments,
+    common: CommonArgs,
+    /// Also fetch and fast-forward submodules (normally pinned by their parent)
+    #[arg(long)]
+    submodules: bool,
+}
+
+#[derive(clap::Args)]
+struct StatusArgs {
+    #[command(flatten)]
+    common: CommonArgs,
     /// Show only repositories needing attention
     #[arg(long)]
     dirty: bool,
@@ -60,32 +80,29 @@ struct StatusArguments {
     worktrees: bool,
 }
 
-#[derive(clap::Args)]
-struct WorkspaceArguments {
-    /// Workspace root (overrides REPOS_ROOT; one is required)
-    #[arg(long, value_name = "PATH", allow_hyphen_values = true)]
-    root: Option<PathBuf>,
-    /// Maximum directory depth (root is 0; -1 disables the limit)
-    #[arg(long, value_name = "N", default_value_t = 3, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(-1..))]
-    max_depth: i64,
-}
-
 fn main() -> ExitCode {
-    let arguments = Arguments::parse();
-    match arguments.command {
+    let cli = Cli::parse();
+    match cli.command {
         Some(Command::FastForward(options)) => run_fast_forward(options),
         Some(Command::Fetch(options)) => run_fetch(options),
         Some(Command::Status(options)) => run_status(options),
-        None => run_status(arguments.status),
+        None => run_status(cli.status),
     }
 }
 
-fn run_fast_forward(options: WorkspaceArguments) -> ExitCode {
-    let (root, max_depth) = match resolve_workspace(options) {
+fn run_fast_forward(options: FastForwardArgs) -> ExitCode {
+    let (root, max_depth) = match resolve_workspace(options.common) {
         Ok(workspace) => workspace,
         Err(code) => return code,
     };
-    let (paths, mut errors) = workspace::discover(&root, max_depth);
+    let (mut paths, mut errors) = workspace::discover(&root, max_depth);
+    if !options.submodules {
+        // Keep the root even if it is a submodule: it was selected explicitly.
+        // Keep paths that fail to open; the worker reports their errors.
+        paths.retain(|path| {
+            path == &root || !git::Repository::open(path).is_ok_and(|repo| repo.is_submodule())
+        });
+    }
     let paths = workspace::fetch_paths(paths);
     let color = render::color_enabled(&io::stdout());
     let progress = render::FetchProgress::new(&root, &paths);
@@ -100,7 +117,8 @@ fn run_fast_forward(options: WorkspaceArguments) -> ExitCode {
             repo.fast_forward()
                 .map_err(|error| error.message().to_owned())
         })();
-        progress.finish_message(path, result.as_deref().unwrap_or("failed"), result.is_err());
+        let (message, indicator) = fast_forward_summary(&result);
+        progress.finish_message(path, &message, indicator);
         result
     });
     if let Err(error) = progress.clear() {
@@ -113,15 +131,12 @@ fn run_fast_forward(options: WorkspaceArguments) -> ExitCode {
         }
     }
     for (path, result) in paths.iter().zip(results) {
-        let failed = result.is_err();
-        let message = match result {
-            Ok(message) => message,
-            Err(error) => {
-                errors.push(format!("{path:?}: {error}"));
-                "fast-forward failed"
-            }
-        };
-        if let Err(error) = render::repository_result(&mut out, &root, path, message, failed, color)
+        let (message, indicator) = fast_forward_summary(&result);
+        if let Err(error) = result {
+            errors.push(format!("{path:?}: {error}"));
+        }
+        if let Err(error) =
+            render::repository_result(&mut out, &root, path, &message, indicator, color)
         {
             errors.push(format!("output: {error}"));
         }
@@ -136,7 +151,17 @@ fn run_fast_forward(options: WorkspaceArguments) -> ExitCode {
     }
 }
 
-fn run_fetch(options: WorkspaceArguments) -> ExitCode {
+fn fast_forward_summary(result: &Result<git::Outcome, String>) -> (String, render::Indicator) {
+    match result {
+        Ok(git::Outcome::Done(message)) => ((*message).to_owned(), render::Indicator::Success),
+        Ok(git::Outcome::Skipped(reason)) => {
+            (format!("skipped: {reason}"), render::Indicator::Skipped)
+        }
+        Err(_) => ("failed".into(), render::Indicator::Failure),
+    }
+}
+
+fn run_fetch(options: CommonArgs) -> ExitCode {
     let (root, max_depth) = match resolve_workspace(options) {
         Ok(workspace) => workspace,
         Err(code) => return code,
@@ -191,8 +216,8 @@ fn run_fetch(options: WorkspaceArguments) -> ExitCode {
     }
 }
 
-fn run_status(options: StatusArguments) -> ExitCode {
-    let (root, max_depth) = match resolve_workspace(options.workspace) {
+fn run_status(options: StatusArgs) -> ExitCode {
+    let (root, max_depth) = match resolve_workspace(options.common) {
         Ok(workspace) => workspace,
         Err(code) => return code,
     };
@@ -236,7 +261,7 @@ fn run_status(options: StatusArguments) -> ExitCode {
     }
 }
 
-fn resolve_workspace(options: WorkspaceArguments) -> Result<(PathBuf, Option<usize>), ExitCode> {
+fn resolve_workspace(options: CommonArgs) -> Result<(PathBuf, Option<usize>), ExitCode> {
     let root = options
         .root
         .or_else(|| env::var_os("REPOS_ROOT").map(PathBuf::from))
@@ -287,12 +312,11 @@ mod tests {
         let mut bytes = b"--root=".to_vec();
         bytes.extend_from_slice(b"repo\xff");
         let arg = OsString::from_vec(bytes);
-        let arguments = Arguments::try_parse_from([OsString::from("repos"), arg])
-            .expect("test arguments should parse");
+        let cli =
+            Cli::try_parse_from([OsString::from("repos"), arg]).expect("test cli should parse");
         assert_eq!(
-            arguments
-                .status
-                .workspace
+            cli.status
+                .common
                 .root
                 .expect("explicit root should be present")
                 .as_os_str()

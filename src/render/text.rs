@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::Path;
 
 // Unicode names for characters that can break lines or reorder displayed text.
@@ -68,7 +69,7 @@ pub(crate) fn path_text(path: &Path) -> String {
                 }
                 let end = valid + error.error_len().unwrap_or(bytes.len() - valid);
                 for byte in &bytes[valid..end] {
-                    output.push_str(&format!("\\x{byte:02x}"));
+                    let _ = write!(output, "\\x{byte:02x}");
                 }
                 bytes = &bytes[end..];
             }

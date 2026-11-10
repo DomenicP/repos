@@ -1,8 +1,14 @@
 use super::Repository;
 use git2::{RepositoryState, build::CheckoutBuilder};
 
+pub enum Outcome {
+    Done(&'static str),
+    /// Nothing was attempted; holds the reason.
+    Skipped(&'static str),
+}
+
 impl Repository {
-    pub fn fast_forward(&self) -> Result<&'static str, git2::Error> {
+    pub fn fast_forward(&self) -> Result<Outcome, git2::Error> {
         if self.repo.state() != RepositoryState::Clean {
             return Err(git2::Error::from_str("repository operation in progress"));
         }
@@ -11,23 +17,25 @@ impl Repository {
             return Err(git2::Error::from_str(&error));
         }
         if status.no_commits {
-            return Ok("skipped: no commits");
+            return Ok(Outcome::Skipped("no commits"));
         }
         if status.branch == "(detached)" {
-            return Ok("skipped: detached HEAD");
+            return Ok(Outcome::Skipped("detached HEAD"));
         }
         if status.upstream.is_empty() {
-            return Ok("skipped: no upstream");
+            return Ok(Outcome::Skipped("no upstream"));
         }
+        // Status leaves this unset only when the configured upstream ref does
+        // not exist, typically because the remote branch was deleted and pruned.
         if !status.ab_known {
-            return Err(git2::Error::from_str("upstream reference is unresolved"));
+            return Ok(Outcome::Skipped("upstream gone"));
         }
         if status.behind == 0 {
-            return Ok(if status.ahead == 0 {
+            return Ok(Outcome::Done(if status.ahead == 0 {
                 "up to date"
             } else {
                 "ahead of upstream"
-            });
+            }));
         }
         if status.ahead > 0 {
             return Err(git2::Error::from_str(
@@ -82,6 +90,6 @@ impl Repository {
         self.repo
             .checkout_tree(target.as_object(), Some(&mut checkout))?;
         transaction.commit()?;
-        Ok("fast-forwarded")
+        Ok(Outcome::Done("fast-forwarded"))
     }
 }

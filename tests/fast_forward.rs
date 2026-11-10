@@ -162,9 +162,9 @@ fn skips_detached_unborn_and_untracked_branches() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("unborn: skipped: no commits"));
-    assert!(text.contains("standalone: skipped: no upstream"));
-    assert!(text.contains("detached: skipped: detached HEAD"));
+    assert!(text.contains("· unborn: skipped: no commits"));
+    assert!(text.contains("· standalone: skipped: no upstream"));
+    assert!(text.contains("· detached: skipped: detached HEAD"));
     assert_eq!(head(&fixture, &detached), before);
     assert_eq!(head(&fixture, &standalone), standalone_before);
 }
@@ -272,7 +272,7 @@ fn local_upstream_updates_files_index_and_reflog() {
 }
 
 #[test]
-fn handles_unresolved_upstream_and_empty_workspace() {
+fn skips_gone_upstream_and_handles_empty_workspace() {
     let fixture = Fixture::new();
     let output = fast_forward(&fixture.root, "ff");
     assert!(output.status.success());
@@ -285,9 +285,61 @@ fn handles_unresolved_upstream_and_empty_workspace() {
     );
     let before = head(&fixture, &local);
     let output = fast_forward(&local, "ff");
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unresolved"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"\xc2\xb7 .: skipped: upstream gone\n");
     assert_eq!(head(&fixture, &local), before);
+}
+
+#[test]
+fn leaves_submodules_pinned_unless_requested() {
+    let fixture = Fixture::new();
+    let source = fixture.repo("source", true);
+    let parent = fixture.repo("workspace/parent", true);
+    let child = fixture.add_submodule(&parent, &source, "child");
+    fixture.commit(&parent);
+    let pinned = head(&fixture, &child);
+    write(&source, "tracked file", "remote edits\n");
+    fixture.commit(&source);
+
+    let output = fast_forward(&fixture.root.join("workspace"), "ff");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("parent: skipped: no upstream"));
+    assert!(!text.contains("child"), "{text}");
+    assert_eq!(head(&fixture, &child), pinned);
+
+    // An explicitly selected root is updated even when it is a submodule.
+    let output = fast_forward(&child, "ff");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"\xe2\x9c\x93 .: fast-forwarded\n");
+    assert_eq!(head(&fixture, &child), head(&fixture, &source));
+    write(&source, "tracked file", "more remote edits\n");
+    fixture.commit(&source);
+
+    let output = command()
+        .args(["ff", "--submodules", "--root"])
+        .arg(fixture.root.join("workspace"))
+        .output()
+        .expect("fast-forward command should execute");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("parent/child: fast-forwarded"));
+    assert_eq!(head(&fixture, &child), head(&fixture, &source));
 }
 
 #[test]

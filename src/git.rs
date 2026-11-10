@@ -2,6 +2,7 @@ mod fast_forward;
 mod fetch;
 mod status;
 
+pub use fast_forward::Outcome;
 pub use status::collect_status;
 
 use git2::RepositoryOpenFlags;
@@ -59,6 +60,23 @@ impl Repository {
 
     pub fn common_dir(&self) -> &Path {
         self.repo.commondir()
+    }
+
+    // A submodule is a checkout whose enclosing repository's index records a
+    // gitlink at its path. Its commit is pinned by that parent.
+    pub fn is_submodule(&self) -> bool {
+        self.path
+            .parent()
+            .and_then(|dir| git2::Repository::discover(dir).ok())
+            .and_then(|parent| {
+                let workdir = parent.workdir()?.canonicalize().ok()?;
+                let path = self.path.canonicalize().ok()?;
+                parent
+                    .index()
+                    .ok()?
+                    .get_path(path.strip_prefix(workdir).ok()?, 0)
+            })
+            .is_some_and(|entry| entry.mode == u32::from(git2::FileMode::Commit))
     }
 
     pub fn open(path: &Path) -> Result<Self, git2::Error> {

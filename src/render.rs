@@ -47,26 +47,33 @@ impl TableCell {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indicator {
+    Success,
+    Skipped,
+    Failure,
+}
+
+impl Indicator {
+    // Returns the marker, its ANSI tone, and the matching indicatif style name.
+    fn style(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Success => ("✓", GREEN, "green"),
+            Self::Skipped => ("·", DIM, "dim"),
+            Self::Failure => ("✗", RED, "red"),
+        }
+    }
+}
+
 pub fn repository_result(
     out: &mut impl Write,
     root: &Path,
     path: &Path,
     message: &str,
-    failed: bool,
+    indicator: Indicator,
     color: bool,
 ) -> io::Result<()> {
-    let style = if failed { ("✗", RED) } else { ("✓", GREEN) };
-    write_result(out, root, path, message, style, color)
-}
-
-fn write_result(
-    out: &mut impl Write,
-    root: &Path,
-    path: &Path,
-    message: &str,
-    (marker, tone): (&str, &'static str),
-    color: bool,
-) -> io::Result<()> {
+    let (marker, tone, _) = indicator.style();
     let relative = path.strip_prefix(root).unwrap_or(path);
     let name = if relative.as_os_str().is_empty() {
         ".".into()

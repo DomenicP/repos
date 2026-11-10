@@ -1,5 +1,5 @@
 use super::{
-    DIM, GREEN, RED, color_enabled,
+    Indicator, color_enabled,
     text::{escape, path_text},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -58,26 +58,20 @@ impl FetchProgress {
     }
 
     pub fn finish(&self, path: &Path, count: usize, failed: bool) {
-        let message = if failed {
-            format!("failed ({count} remotes fetched)")
-        } else if count == 0 {
-            "no remotes".into()
-        } else {
-            format!("fetched {count} remotes")
-        };
-        self.finish_message(path, &message, failed);
+        let (message, indicator) = summary(count, failed);
+        self.finish_message(path, &message, indicator);
     }
 
-    pub fn finish_message(&self, path: &Path, message: &str, failed: bool) {
+    pub fn finish_message(&self, path: &Path, message: &str, indicator: Indicator) {
         if let Some(bar) = self.bars.get(path) {
-            let template = match (self.color, failed) {
-                (true, true) => "✗ {prefix:.bold} {msg:.red}",
-                (true, false) => "✓ {prefix:.bold} {msg:.green}",
-                (false, true) => "✗ {prefix} {msg}",
-                (false, false) => "✓ {prefix} {msg}",
+            let (marker, _, style) = indicator.style();
+            let template = if self.color {
+                format!("{marker} {{prefix:.bold}} {{msg:.{style}}}")
+            } else {
+                format!("{marker} {{prefix}} {{msg}}")
             };
             bar.set_style(
-                ProgressStyle::with_template(template).expect("finished fetch template is valid"),
+                ProgressStyle::with_template(&template).expect("finished fetch template is valid"),
             );
             bar.finish_with_message(message.to_owned());
         }
@@ -96,20 +90,19 @@ pub fn fetch_result(
     failed: bool,
     color: bool,
 ) -> io::Result<()> {
-    let message = if failed {
-        format!("fetch failed ({count} remotes fetched)")
-    } else if count == 0 {
-        "no remotes".into()
-    } else {
-        format!("fetched {count} remotes")
-    };
-    let (marker, tone) = if failed {
-        ("✗", RED)
-    } else if count == 0 {
-        ("·", DIM)
-    } else {
-        ("✓", GREEN)
-    };
+    let (message, indicator) = summary(count, failed);
+    super::repository_result(out, root, path, &message, indicator, color)
+}
 
-    super::write_result(out, root, path, &message, (marker, tone), color)
+fn summary(count: usize, failed: bool) -> (String, Indicator) {
+    if failed {
+        (
+            format!("failed ({count} remotes fetched)"),
+            Indicator::Failure,
+        )
+    } else if count == 0 {
+        ("no remotes".into(), Indicator::Skipped)
+    } else {
+        (format!("fetched {count} remotes"), Indicator::Success)
+    }
 }

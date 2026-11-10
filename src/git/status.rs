@@ -184,7 +184,7 @@ fn staged_gitlinks(
     for (oid, count) in added {
         // libgit2 reports exact-commit gitlink renames as add/delete. Git counts
         // the pair as one staged path, so subtract the paired deletions.
-        counts.staged -= count.min(*deleted.get(&oid).unwrap_or(&0));
+        counts.staged -= count.min(deleted.get(&oid).copied().unwrap_or(0));
     }
     Ok(())
 }
