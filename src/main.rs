@@ -32,6 +32,9 @@ struct Arguments {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Fetch every remote, then fast-forward the current branch to its upstream
+    #[command(visible_alias = "ff")]
+    FastForward(WorkspaceArguments),
     /// Fetch every configured remote in discovered repositories
     Fetch(WorkspaceArguments),
     /// Summarize local Git repositories
@@ -70,9 +73,66 @@ struct WorkspaceArguments {
 fn main() -> ExitCode {
     let arguments = Arguments::parse();
     match arguments.command {
+        Some(Command::FastForward(options)) => run_fast_forward(options),
         Some(Command::Fetch(options)) => run_fetch(options),
         Some(Command::Status(options)) => run_status(options),
         None => run_status(arguments.status),
+    }
+}
+
+fn run_fast_forward(options: WorkspaceArguments) -> ExitCode {
+    let (root, max_depth) = match resolve_workspace(options) {
+        Ok(workspace) => workspace,
+        Err(code) => return code,
+    };
+    let (paths, mut errors) = workspace::discover(&root, max_depth);
+    let paths = workspace::fetch_paths(paths);
+    let color = render::color_enabled(&io::stdout());
+    let progress = render::FetchProgress::new(&root, &paths);
+    let results = workspace::run(&paths, |path| {
+        let result = (|| {
+            let repo = git::Repository::open(path).map_err(|error| error.message().to_owned())?;
+            let (_, errors) = repo.fetch(|remote, message| progress.update(path, remote, message));
+            if !errors.is_empty() {
+                return Err(errors.join("; "));
+            }
+            progress.update(path, "upstream", "fast-forwarding");
+            repo.fast_forward()
+                .map_err(|error| error.message().to_owned())
+        })();
+        progress.finish_message(path, result.as_deref().unwrap_or("failed"), result.is_err());
+        result
+    });
+    if let Err(error) = progress.clear() {
+        errors.push(format!("progress output: {error}"));
+    }
+    let mut out = io::stdout().lock();
+    if paths.is_empty() {
+        if let Err(error) = writeln!(out, "No repositories found.") {
+            errors.push(format!("output: {error}"));
+        }
+    }
+    for (path, result) in paths.iter().zip(results) {
+        let failed = result.is_err();
+        let message = match result {
+            Ok(message) => message,
+            Err(error) => {
+                errors.push(format!("{path:?}: {error}"));
+                "fast-forward failed"
+            }
+        };
+        if let Err(error) = render::repository_result(&mut out, &root, path, message, failed, color)
+        {
+            errors.push(format!("output: {error}"));
+        }
+    }
+    for error in &errors {
+        let _ = writeln!(io::stderr(), "repos: {error}");
+    }
+    if errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

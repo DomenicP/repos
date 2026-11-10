@@ -1,3 +1,4 @@
+mod fast_forward;
 mod fetch;
 mod status;
 

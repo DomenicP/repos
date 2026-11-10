@@ -1,49 +1,29 @@
 # repos
 
-Bulk commands for quickly working with multiple Git repositories. Assumes you already have Git installed.
+Bulk commands for quickly working with multiple Git repositories.
 
 ## Features
 
-**status**: Show local Git repositories, branches, changes, and upstream status in a compact table. Include linked worktrees with `--worktrees`. Long names are shortened in the middle with `…` to fit the terminal, keeping one row per repository. Redirected output shows full names.
-
-**fetch**: Fetch every configured remote in discovered repositories in parallel using SSH-agent authentication (SSH URLs must include a username). Failed remotes are reported while other fetches continue; any failure exits with code 1. Submodules are fetched only when discovery finds them.
-
-Discovery defaults to depth 3 (root is 0), includes nested repositories, and skips child directory symlinks. Fetch runs once per shared repository, preferring its base checkout when discovered, even when multiple linked worktrees are found.
-
-Changes: `S` staged, `M` modified, `?` untracked, `!` conflicts.
-Upstream: `=` equal, `+N` ahead, `-N` behind, `+N/-N` diverged,
-`?` unresolved, `-` absent. Counts use local refs and may be stale.
+- **status**: Show local Git repositories, branches, changes, and upstream status in a compact table.
+- **fetch**: Fetch repositories from remotes in parallel.
+- **fast-forward** (alias **ff**): Fetch from remotes, then fast-forward the current branch to its upstream.
 
 ## Usage
 
 Requires Rust 1.85+ and a native C toolchain. libgit2 is bundled.
 
 ```sh
-# In .bashrc or equiv
+# In .bashrc or equivalent
 export REPOS_ROOT="${HOME}/src"
 
 # Build and install
 cargo install --path . --locked
 
 # Run commands
-repos status
+repos status  # default subcommand
 repos fetch
+repos ff
 ```
-
-`repos` defaults to `status`. Provide the workspace root with `--root` or
-`REPOS_ROOT`; `--root` takes precedence.
-
-```sh
-repos --root ~/src --dirty          # Only repositories needing attention
-repos --root ~/src --unsynced    # Ahead of or behind upstream (local refs)
-repos --root ~/src --submodules     # Include submodule rows
-repos status --root ~/src --worktrees # Include linked worktrees
-repos --root ~/src --max-depth -1   # Search without a depth limit
-repos --help                        # All options and output labels
-```
-
-`--unsynced` excludes absent or unresolved upstreams. Combine it with
-`--dirty` to require both filters to match. Inspection errors remain visible.
 
 ## Development
 

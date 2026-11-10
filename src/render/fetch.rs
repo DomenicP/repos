@@ -1,5 +1,5 @@
 use super::{
-    BOLD, DIM, GREEN, RED, TableCell, color_enabled,
+    DIM, GREEN, RED, color_enabled,
     text::{escape, path_text},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -58,6 +58,17 @@ impl FetchProgress {
     }
 
     pub fn finish(&self, path: &Path, count: usize, failed: bool) {
+        let message = if failed {
+            format!("failed ({count} remotes fetched)")
+        } else if count == 0 {
+            "no remotes".into()
+        } else {
+            format!("fetched {count} remotes")
+        };
+        self.finish_message(path, &message, failed);
+    }
+
+    pub fn finish_message(&self, path: &Path, message: &str, failed: bool) {
         if let Some(bar) = self.bars.get(path) {
             let template = match (self.color, failed) {
                 (true, true) => "✗ {prefix:.bold} {msg:.red}",
@@ -68,14 +79,7 @@ impl FetchProgress {
             bar.set_style(
                 ProgressStyle::with_template(template).expect("finished fetch template is valid"),
             );
-            let message = if failed {
-                format!("failed ({count} remotes fetched)")
-            } else if count == 0 {
-                "no remotes".into()
-            } else {
-                format!("fetched {count} remotes")
-            };
-            bar.finish_with_message(message);
+            bar.finish_with_message(message.to_owned());
         }
     }
 
@@ -92,12 +96,6 @@ pub fn fetch_result(
     failed: bool,
     color: bool,
 ) -> io::Result<()> {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let name = if relative.as_os_str().is_empty() {
-        ".".into()
-    } else {
-        path_text(relative)
-    };
     let message = if failed {
         format!("fetch failed ({count} remotes fetched)")
     } else if count == 0 {
@@ -113,11 +111,5 @@ pub fn fetch_result(
         ("✓", GREEN)
     };
 
-    let mut line = String::new();
-    TableCell::new(format!("{marker} "), tone).write(&mut line, color, None);
-    TableCell::new(name, BOLD).write(&mut line, color, None);
-    line.push_str(": ");
-    TableCell::new(message, tone).write(&mut line, color, None);
-    writeln!(out, "{line}")?;
-    out.flush()
+    super::write_result(out, root, path, &message, (marker, tone), color)
 }

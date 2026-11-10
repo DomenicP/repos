@@ -5,7 +5,9 @@ mod text;
 pub use fetch::{FetchProgress, fetch_result};
 pub use status::{StatusFilter, status_progress, table};
 
-use std::io::IsTerminal;
+use self::text::path_text;
+use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
 pub fn color_enabled(stream: &impl IsTerminal) -> bool {
@@ -43,4 +45,39 @@ impl TableCell {
             line.push_str(&" ".repeat(width - self.text.width() + 1));
         }
     }
+}
+
+pub fn repository_result(
+    out: &mut impl Write,
+    root: &Path,
+    path: &Path,
+    message: &str,
+    failed: bool,
+    color: bool,
+) -> io::Result<()> {
+    let style = if failed { ("✗", RED) } else { ("✓", GREEN) };
+    write_result(out, root, path, message, style, color)
+}
+
+fn write_result(
+    out: &mut impl Write,
+    root: &Path,
+    path: &Path,
+    message: &str,
+    (marker, tone): (&str, &'static str),
+    color: bool,
+) -> io::Result<()> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let name = if relative.as_os_str().is_empty() {
+        ".".into()
+    } else {
+        path_text(relative)
+    };
+    let mut line = String::new();
+    TableCell::new(format!("{marker} "), tone).write(&mut line, color, None);
+    TableCell::new(name, BOLD).write(&mut line, color, None);
+    line.push_str(": ");
+    TableCell::new(message.to_owned(), tone).write(&mut line, color, None);
+    writeln!(out, "{line}")?;
+    out.flush()
 }
